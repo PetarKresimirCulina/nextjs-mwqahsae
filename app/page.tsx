@@ -1,5 +1,14 @@
 "use client";
 
+interface Token {
+    symbol: string;
+      name: string;
+        color: string;
+          cg: string;
+            custom?: boolean;
+            }
+}
+
 import { useState, useEffect, useRef, useCallback } from "react";
 
 // ── Konstante ─────────────────────────────────────────────────────────────────
