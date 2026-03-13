@@ -2,5 +2,6 @@
   "/favicon.ico/route": "app/favicon.ico/route.js",
   "/api/crypto/route": "app/api/crypto/route.js",
   "/api/fng/route": "app/api/fng/route.js",
+  "/api/search/route": "app/api/search/route.js",
   "/page": "app/page.js"
 }
