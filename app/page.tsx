@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -393,16 +394,16 @@ export default function Home() {
           {tokens.map((t) => {
             const c = coins[t.cg];
             if (!c) return (
-              <div key={t.symbol} style={{ background: "#0a1422", border: "1px solid #1e2d3d", borderRadius: 14, padding: 16, height: 130, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <div key={t.cg} style={{ background: "#0a1422", border: "1px solid #1e2d3d", borderRadius: 14, padding: 16, height: 130, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <span style={{ color: "#334155", fontSize: 12 }}>{t.symbol} — učitavam…</span>
               </div>
             );
             const p = computePrediction(c, fngVal);
-            const isSel = selected === t.symbol;
+            const isSel = selected === t.cg;
             const spark = c.sparkline_in_7d?.price ?? [];
             return (
-              <div key={t.symbol}
-                onClick={() => setSelected(isSel ? null : t.symbol)}
+              <div key={t.cg}
+                onClick={() => setSelected(isSel ? null : t.cg)}
                 style={{ background: isSel ? "#0a1e35" : "#0a1422", border: `1px solid ${isSel ? t.color : "#1e2d3d"}`, borderRadius: 14, padding: 16, cursor: "pointer", transition: "all 0.2s", boxShadow: isSel ? `0 0 20px ${t.color}30` : "none", position: "relative" }}
               >
                 {t.custom && (
@@ -558,4 +559,3 @@ export default function Home() {
     </div>
   );
 }
-// fix symbol
