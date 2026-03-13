@@ -1,7 +1,5 @@
 import { NextResponse, NextRequest } from "next/server";
-/*
-const CACHE_TTL = 60 * 60 * 1000; // 1 sat
-*/
+
 interface CoinListItem { id: string; symbol: string; name: string; }
 
 const CACHE_TTL = 60 * 60 * 1000;
@@ -22,17 +20,15 @@ export async function GET(request: NextRequest) {
       if (!r.ok) throw new Error(`CoinGecko ${r.status}`);
       listCache.data = await r.json();
       listCache.ts = Date.now();
-    // Novo
-} catch (err) {
-  const msg = err instanceof Error ? err.message : "Unknown error";
-  return NextResponse.json({ error: msg }, { status: 500 });
-}
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      return NextResponse.json({ error: msg }, { status: 500 });
+    }
   }
 
   const q2 = q.toLowerCase();
-  // Novo
-const results = (listCache.data ?? [])
-.filter(c =>
+  const results = (listCache.data ?? [])
+    .filter(c =>
       c.symbol.toLowerCase().includes(q2) ||
       c.name.toLowerCase().includes(q2)
     )

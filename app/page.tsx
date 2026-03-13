@@ -5,14 +5,14 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // ── Tipovi ────────────────────────────────────────────────────────────────────
 interface Token {
   symbol: string;
-    name: string;
-      color: string;
-        cg: string;
-          custom?: boolean;
-          }
-          
+  name: string;
+  color: string;
+  cg: string;
+  custom?: boolean;
+}
+
 // ── Konstante ─────────────────────────────────────────────────────────────────
-const DEFAULT_TOKENS = [
+const DEFAULT_TOKENS: Token[] = [
   { symbol: "BTC",  name: "Bitcoin",   color: "#F7931A", cg: "bitcoin" },
   { symbol: "ETH",  name: "Ethereum",  color: "#627EEA", cg: "ethereum" },
   { symbol: "SOL",  name: "Solana",    color: "#9945FF", cg: "solana" },
@@ -31,25 +31,25 @@ const nextColor = () => EXTRA_COLORS[colorIdx++ % EXTRA_COLORS.length];
 const COOLDOWN_MS = 65000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const fmtPrice = (p) => {
+const fmtPrice = (p: number) => {
   if (!p && p !== 0) return "—";
   if (p >= 1000) return "$" + Number(p).toLocaleString("en-US", { maximumFractionDigits: 0 });
   if (p >= 1)    return "$" + Number(p).toFixed(2);
   return "$"     + Number(p).toFixed(4);
 };
 
-const fmtBig = (n) => {
+const fmtBig = (n: number) => {
   if (!n) return "—";
   if (n >= 1e12) return "$" + (n / 1e12).toFixed(2) + "T";
   if (n >= 1e9)  return "$" + (n / 1e9).toFixed(2) + "B";
   return "$"     + (n / 1e6).toFixed(2) + "M";
 };
 
-const FNG_LABEL = (v) =>
+const FNG_LABEL = (v: number) =>
   v >= 75 ? "Extreme Greed" : v >= 55 ? "Greed" :
   v >= 45 ? "Neutral" : v >= 25 ? "Fear" : "Extreme Fear";
 
-const sigColor = (s) => ({
+const sigColor = (s: string): string => ({
   "STRONG BUY": "#4ade80", "BUY": "#86efac", "NEUTRAL": "#facc15",
   "SELL": "#fca5a5", "STRONG SELL": "#f87171",
 }[s] || "#fff");
@@ -251,7 +251,7 @@ function TokenSearch({ onAdd, existingIds }) {
 
 // ── Glavna komponenta ─────────────────────────────────────────────────────────
 export default function Home() {
-  const [tokens, setTokens]       = useState<Token[]>(DEFAULT_TOKENS);
+  const [tokens, setTokens]       = useState(DEFAULT_TOKENS);
   const [coins, setCoins]         = useState({});
   const [fng, setFng]             = useState(null);
   const [selected, setSelected]   = useState(null);
@@ -391,7 +391,7 @@ export default function Home() {
         {/* Token Grid */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14, marginBottom: 22 }}>
           {tokens.map((t) => {
-            const c = coins[t.symbol];
+            const c = coins[t.cg];
             if (!c) return (
               <div key={t.symbol} style={{ background: "#0a1422", border: "1px solid #1e2d3d", borderRadius: 14, padding: 16, height: 130, display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <span style={{ color: "#334155", fontSize: 12 }}>{t.symbol} — učitavam…</span>
@@ -407,7 +407,7 @@ export default function Home() {
               >
                 {t.custom && (
                   <button
-                    onClick={(e) => { e.stopPropagation(); handleRemoveToken(t.symbol); }}
+                    onClick={(e) => { e.stopPropagation(); handleRemoveToken(t.cg); }}
                     style={{ position: "absolute", top: 8, right: 10, background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 4px" }}
                     title="Ukloni token"
                   >×</button>
@@ -558,3 +558,4 @@ export default function Home() {
     </div>
   );
 }
+// fix symbol
