@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 
-
 const CACHE_TTL = 5 * 60 * 1000;
 let cache = { data: null, ts: 0 };
 
