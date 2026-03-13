@@ -18,9 +18,11 @@ export async function GET(request: NextRequest) {
       if (!r.ok) throw new Error(`CoinGecko ${r.status}`);
       listCache.data = await r.json();
       listCache.ts = Date.now();
-    } catch (err) {
-      return NextResponse.json({ error: err.message }, { status: 500 });
-    }
+    // Novo
+} catch (err) {
+  const msg = err instanceof Error ? err.message : "Unknown error";
+  return NextResponse.json({ error: msg }, { status: 500 });
+}
   }
 
   const q2 = q.toLowerCase();
