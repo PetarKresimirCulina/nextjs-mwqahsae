@@ -1,16 +1,16 @@
 "use client";
 
-interface Token {
-    symbol: string;
-      name: string;
-        color: string;
-          cg: string;
-            custom?: boolean;
-            }
-}
-
 import { useState, useEffect, useRef, useCallback } from "react";
 
+// ── Tipovi ────────────────────────────────────────────────────────────────────
+interface Token {
+  symbol: string;
+    name: string;
+      color: string;
+        cg: string;
+          custom?: boolean;
+          }
+          
 // ── Konstante ─────────────────────────────────────────────────────────────────
 const DEFAULT_TOKENS = [
   { symbol: "BTC",  name: "Bitcoin",   color: "#F7931A", cg: "bitcoin" },
