@@ -251,7 +251,7 @@ function TokenSearch({ onAdd, existingIds }) {
 
 // ── Glavna komponenta ─────────────────────────────────────────────────────────
 export default function Home() {
-  const [tokens, setTokens]       = useState(DEFAULT_TOKENS);
+  const [tokens, setTokens]       = useState<Token[]>(DEFAULT_TOKENS);
   const [coins, setCoins]         = useState({});
   const [fng, setFng]             = useState(null);
   const [selected, setSelected]   = useState(null);
