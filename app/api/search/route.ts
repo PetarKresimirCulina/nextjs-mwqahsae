@@ -26,8 +26,9 @@ export async function GET(request: NextRequest) {
   }
 
   const q2 = q.toLowerCase();
-  const results = listCache.data
-    .filter(c =>
+  // Novo
+const results = (listCache.data ?? [])
+.filter(c =>
       c.symbol.toLowerCase().includes(q2) ||
       c.name.toLowerCase().includes(q2)
     )
