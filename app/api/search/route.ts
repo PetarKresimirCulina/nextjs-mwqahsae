@@ -1,7 +1,7 @@
 import { NextResponse, NextRequest } from "next/server";
-
+/*
 const CACHE_TTL = 60 * 60 * 1000; // 1 sat
-
+*/
 interface CoinListItem { id: string; symbol: string; name: string; }
 
 const CACHE_TTL = 60 * 60 * 1000;
