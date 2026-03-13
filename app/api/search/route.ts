@@ -1,7 +1,11 @@
 import { NextResponse, NextRequest } from "next/server";
 
 const CACHE_TTL = 60 * 60 * 1000; // 1 sat
-let listCache = { data: null, ts: 0 };
+
+interface CoinListItem { id: string; symbol: string; name: string; }
+
+const CACHE_TTL = 60 * 60 * 1000;
+let listCache: { data: CoinListItem[] | null; ts: number } = { data: null, ts: 0 };
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
