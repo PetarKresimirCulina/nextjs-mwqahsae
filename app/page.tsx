@@ -436,6 +436,62 @@ function computeBacktest(prices: number[], volumes: number[], coin: any): Backte
   return results;
 }
 
+// ── Take Profit / Stop Loss kalkulator ────────────────────────────────────────
+function calcTPSL(pred: ReturnType<typeof computePrediction>, prices: number[], price: number) {
+  // ATR (Average True Range) na zadnjih 14 perioda
+  let atr = 0;
+  if (prices.length >= 15) {
+    let atrSum = 0;
+    for (let i = prices.length - 14; i < prices.length; i++) {
+      atrSum += Math.abs(prices[i] - prices[i - 1]);
+    }
+    atr = atrSum / 14;
+  } else {
+    atr = price * 0.02; // fallback 2%
+  }
+  const atrPct = atr / price * 100;
+
+  // Bollinger širina kao mjera volatilnosti
+  const bollWidth = pred.bollPct; // 0-100, >80 = široke bande = visoka vol.
+  const volMultiplier = bollWidth > 70 ? 1.4 : bollWidth < 30 ? 0.8 : 1.0;
+
+  const signal = pred.signal;
+  const isStrong = signal.includes("STRONG");
+  const isBuy = signal.includes("BUY");
+  const isSell = signal.includes("SELL");
+
+  // Bazni TP/SL multiplikatori prema jakosti signala
+  const tpMult = isStrong ? 3.0 : 2.0;
+  const slMult = isStrong ? 1.2 : 1.5; // SL bliži kod jakog signala (veće uvjerenje)
+
+  const tpDist = atr * tpMult * volMultiplier;
+  const slDist = atr * slMult * volMultiplier;
+
+  // Bollinger band razine kao dodatne reference
+  const avg20 = prices.slice(-20).reduce((a, b) => a + b, 0) / 20;
+  const std20 = Math.sqrt(prices.slice(-20).reduce((a, b) => a + (b - avg20) ** 2, 0) / 20);
+  const bbUpper = avg20 + 2 * std20;
+  const bbLower = avg20 - 2 * std20;
+
+  if (isBuy) {
+    const tp = price + tpDist;
+    const sl = price - slDist;
+    // Korigiraj TP prema Bollinger gornjoj bandi ako je blizu
+    const tpFinal = bbUpper > price && bbUpper < tp * 1.1 ? Math.max(tp, bbUpper * 0.98) : tp;
+    const slFinal = bbLower > 0 && bbLower > sl * 0.95 ? Math.min(sl, bbLower * 1.02) : sl;
+    const rr = tpDist / slDist;
+    return { tp: tpFinal, sl: slFinal, tpPct: (tpFinal - price) / price * 100, slPct: (slFinal - price) / price * 100, rr, atrPct, side: "LONG" as const };
+  } else if (isSell) {
+    const tp = price - tpDist;
+    const sl = price + slDist;
+    const tpFinal = bbLower > 0 && bbLower > tp * 0.9 ? Math.min(tp, bbLower * 1.02) : tp;
+    const slFinal = bbUpper < sl * 1.05 ? Math.max(sl, bbUpper * 0.98) : sl;
+    const rr = tpDist / slDist;
+    return { tp: tpFinal, sl: slFinal, tpPct: (tpFinal - price) / price * 100, slPct: (slFinal - price) / price * 100, rr, atrPct, side: "SHORT" as const };
+  }
+  return null;
+}
+
 // ── BacktestModal ──────────────────────────────────────────────────────────────
 function BacktestModal({ tokens, allHistory, coins, onClose }: {
   tokens: Token[];
@@ -1327,6 +1383,90 @@ export default function Home() {
                   </div>
                   <div style={{fontSize:12,fontWeight:700,color:sigColor(p.signal)}}>{p.signal}</div>
                 </div>
+
+                {/* TP/SL blok */}
+                {(()=>{
+                  const tpslPrices = history?.prices ?? c.sparkline_in_7d?.price ?? [];
+                  const tpsl = calcTPSL(p, tpslPrices, c.current_price);
+                  if (!tpsl) return (
+                    <div style={{marginBottom:16,padding:"12px 16px",background:"#060d18",borderRadius:10,border:"1px solid #1e2d3d",fontSize:12,color:"#334155",textAlign:"center"}}>
+                      📊 TP/SL nije dostupan za NEUTRAL signal
+                    </div>
+                  );
+                  const isLong = tpsl.side === "LONG";
+                  const accentColor = isLong ? "#4ade80" : "#f87171";
+                  const fmt = (v: number) => fmtPrice(Math.max(0, v));
+                  return (
+                    <div style={{marginBottom:16,padding:"14px 16px",background:"#060d18",borderRadius:10,border:`1px solid ${accentColor}25`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                        <div style={{fontSize:12,fontWeight:700,color:"#94a3b8",textTransform:"uppercase",letterSpacing:1}}>
+                          🎯 Take Profit / Stop Loss
+                        </div>
+                        <div style={{fontSize:10,color:"#475569"}}>
+                          ATR: <span style={{color:"#64748b",fontWeight:600}}>{tpsl.atrPct.toFixed(2)}%</span>
+                          <span style={{marginLeft:8}}>Smjer: <span style={{color:accentColor,fontWeight:700}}>{tpsl.side}</span></span>
+                        </div>
+                      </div>
+
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+                        {/* Take Profit */}
+                        <div style={{background:"#0a1422",borderRadius:8,padding:"12px 14px",border:"1px solid #4ade8025"}}>
+                          <div style={{fontSize:10,color:"#475569",marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
+                            <span style={{width:7,height:7,borderRadius:"50%",background:"#4ade80",display:"inline-block"}}/>
+                            Take Profit
+                          </div>
+                          <div style={{fontSize:20,fontWeight:800,color:"#4ade80"}}>{fmt(tpsl.tp)}</div>
+                          <div style={{fontSize:11,color:"#4ade80",opacity:0.7,marginTop:2}}>
+                            {isLong ? "+" : ""}{tpsl.tpPct.toFixed(2)}%
+                          </div>
+                        </div>
+                        {/* Stop Loss */}
+                        <div style={{background:"#0a1422",borderRadius:8,padding:"12px 14px",border:"1px solid #f8717125"}}>
+                          <div style={{fontSize:10,color:"#475569",marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
+                            <span style={{width:7,height:7,borderRadius:"50%",background:"#f87171",display:"inline-block"}}/>
+                            Stop Loss
+                          </div>
+                          <div style={{fontSize:20,fontWeight:800,color:"#f87171"}}>{fmt(tpsl.sl)}</div>
+                          <div style={{fontSize:11,color:"#f87171",opacity:0.7,marginTop:2}}>
+                            {tpsl.slPct.toFixed(2)}%
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Vizualna cijena skala */}
+                      {(()=>{
+                        const lo = Math.min(tpsl.sl, tpsl.tp) * 0.995;
+                        const hi = Math.max(tpsl.sl, tpsl.tp) * 1.005;
+                        const range = hi - lo || 1;
+                        const curPct  = Math.min(98, Math.max(2, (c.current_price - lo) / range * 100));
+                        const tpPct   = Math.min(98, Math.max(2, (tpsl.tp - lo) / range * 100));
+                        const slPct   = Math.min(98, Math.max(2, (tpsl.sl - lo) / range * 100));
+                        return (
+                          <div style={{marginBottom:10,position:"relative",height:28}}>
+                            {/* Track */}
+                            <div style={{position:"absolute",top:"50%",left:0,right:0,height:4,borderRadius:2,background:"#1e2a3a",transform:"translateY(-50%)"}}/>
+                            {/* Fill između SL i TP */}
+                            <div style={{position:"absolute",top:"50%",left:`${Math.min(slPct,tpPct)}%`,width:`${Math.abs(tpPct-slPct)}%`,height:4,borderRadius:2,background:`linear-gradient(90deg,#f87171,#4ade80)`,transform:"translateY(-50%)",opacity:0.4}}/>
+                            {/* SL marker */}
+                            <div style={{position:"absolute",top:"50%",left:`${slPct}%`,transform:"translate(-50%,-50%)",width:10,height:10,borderRadius:"50%",background:"#f87171",border:"2px solid #060d18",boxShadow:"0 0 6px #f87171"}}/>
+                            {/* TP marker */}
+                            <div style={{position:"absolute",top:"50%",left:`${tpPct}%`,transform:"translate(-50%,-50%)",width:10,height:10,borderRadius:"50%",background:"#4ade80",border:"2px solid #060d18",boxShadow:"0 0 6px #4ade80"}}/>
+                            {/* Current price marker */}
+                            <div style={{position:"absolute",top:"50%",left:`${curPct}%`,transform:"translate(-50%,-50%)",width:12,height:12,borderRadius:"50%",background:"#fff",border:"2px solid #060d18",boxShadow:"0 0 8px rgba(255,255,255,0.5)",zIndex:2}}/>
+                          </div>
+                        );
+                      })()}
+
+                      {/* R:R ratio + napomena */}
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11}}>
+                        <span style={{color:"#475569"}}>
+                          Risk/Reward: <span style={{color:tpsl.rr>=2?"#4ade80":tpsl.rr>=1.5?"#facc15":"#f87171",fontWeight:700}}>1 : {tpsl.rr.toFixed(1)}</span>
+                        </span>
+                        <span style={{color:"#1e3a5f",fontSize:10}}>Temeljeno na ATR + Bollinger · Nije financijski savjet</span>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div style={{marginBottom:20}}>
                   <div style={{display:"flex",gap:6,marginBottom:10}}>
