@@ -93,13 +93,34 @@ function calcATHScore(price: number, ath: number, atl: number): number {
   return +(athScore * 0.5 + atlScore * 0.5).toFixed(1);
 }
 
+// ── MACD helper — vraća bull flag i strength ───────────────────────────────────
+function calcMACD(prices: number[]): { bull: boolean; strength: number } {
+  if (prices.length < 26) return { bull: false, strength: 0 };
+  const k12 = 2/13, k26 = 2/27, k9 = 2/10;
+  let e12 = prices[0], e26 = prices[0], sig = 0;
+  prices.forEach((v, i) => {
+    if (i) { e12 = v*k12 + e12*(1-k12); e26 = v*k26 + e26*(1-k26); }
+    const line = e12 - e26;
+    if (i === 0) sig = line; else sig = line*k9 + sig*(1-k9);
+  });
+  const macdLine = e12 - e26;
+  const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+  return {
+    bull: macdLine > sig,
+    strength: avgPrice > 0 ? Math.abs(macdLine - sig) / avgPrice * 100 : 0,
+  };
+}
+
 // ── Shared majority vote core ──────────────────────────────────────────────────
 function majorityVote(
   rsi: number, stochRSI: number, williamsR: number,
-  macdBull: boolean, ma7: number, ma30: number, ma90: number,
-  bollPct: number, obvScore: number
+  macdBull: boolean, macdStrength: number,
+  ma7: number, ma30: number, ma90: number,
+  bollPct: number, obvScore: number,
+  hasLongHistory = true
 ): { signal: string; score: number; bullPct: number; bearPct: number } {
   const votes: number[] = [];
+
   // RSI
   if (rsi < 35) votes.push(1); else if (rsi > 65) votes.push(-1); else votes.push(0);
   // Stoch RSI
@@ -107,18 +128,28 @@ function majorityVote(
   // Williams %R
   const wrD = 100 - williamsR;
   if (wrD < 25) votes.push(1); else if (wrD > 75) votes.push(-1); else votes.push(0);
-  // MACD
-  votes.push(macdBull ? 1 : -1);
-  // MA kratkoročni
-  votes.push(ma7 > ma30 ? 1 : -1);
-  // MA dugoročni
-  votes.push(ma30 > ma90 ? 1 : -1);
+
+  // FIX: MACD — neutralno ako je signal slab (< 0.05% od avg cijene)
+  if (macdStrength < 0.05) votes.push(0);
+  else votes.push(macdBull ? 1 : -1);
+
+  // FIX: MA7 vs MA30 — neutralno ako su gotovo identični (< 0.5% razlike)
+  const maDiff7_30 = ma30 > 0 ? Math.abs(ma7 - ma30) / ma30 * 100 : 0;
+  if (maDiff7_30 < 0.5) votes.push(0);
+  else votes.push(ma7 > ma30 ? 1 : -1);
+
+  // MA dugoročni i death cross — samo ako imamo 90d history
+  if (hasLongHistory) {
+    const maDiff30_90 = ma90 > 0 ? Math.abs(ma30 - ma90) / ma90 * 100 : 0;
+    if (maDiff30_90 < 0.5) votes.push(0);
+    else votes.push(ma30 > ma90 ? 1 : -1);
+    if (ma7 < ma30 && ma30 < ma90) votes.push(-1); // death cross penalty
+  }
+
   // Bollinger
   if (bollPct < 20) votes.push(1); else if (bollPct > 80) votes.push(-1); else votes.push(0);
   // OBV
   if (obvScore > 60) votes.push(1); else if (obvScore < 40) votes.push(-1); else votes.push(0);
-  // Death cross extra penalty
-  if (ma7 < ma30 && ma30 < ma90) votes.push(-1);
 
   const bullV = votes.filter(v => v === 1).length;
   const bearV = votes.filter(v => v === -1).length;
@@ -126,7 +157,7 @@ function majorityVote(
   const bPct = bullV / total, rPct = bearV / total;
 
   let signal: string, score: number;
- if (bPct >= 0.55) {
+  if (bPct >= 0.55) {
     signal = bPct >= 0.72 ? "STRONG BUY" : "BUY";
     score = Math.round(50 + bPct * 50);
   } else if (rPct >= 0.55) {
@@ -155,7 +186,7 @@ function computeTokenSentiment(coin: any) {
   return {score,label,color,breakdown:[["Vol. aktivnost",+volRatio.toFixed(0),"#f59e0b"],["Akceleracija",+accel.toFixed(0),"#22d3ee"],["Stabilnost",+stability.toFixed(0),"#60a5fa"]] as [string,number,string][]};
 }
 
-// ── Prediction engine (majority vote) ─────────────────────────────────────────
+// ── Prediction engine ──────────────────────────────────────────────────────────
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function computePrediction(coin: any, tokenSentiment: number, extPrices?: number[], extVolumes?: number[]) {
   const price = coin.current_price ?? 0;
@@ -164,56 +195,85 @@ function computePrediction(coin: any, tokenSentiment: number, extPrices?: number
   const vol = coin.total_volume ?? 0, mcap = coin.market_cap ?? 1;
   const ath = coin.ath ?? 0, atl = coin.atl ?? 0;
 
+  const hasLongHistory = !!(extPrices && extPrices.length >= 60);
   const prices: number[] = extPrices && extPrices.length > 30 ? extPrices : coin.sparkline_in_7d?.price ?? [];
   const volumes: number[] = extVolumes && extVolumes.length > 0 ? extVolumes : Array(prices.length).fill(vol);
   const avg = (arr: number[]) => arr.length ? arr.reduce((a,b) => a+b,0)/arr.length : price;
 
-  // RSI
-  let rsi = 50;
-  if (prices.length > 14) {
-    let g = 0, l = 0;
-    for (let i = prices.length-14; i < prices.length; i++) { const d = prices[i]-prices[i-1]; d>0?(g+=d):(l-=d); }
-    rsi = 100 - 100/(1 + g/(l||0.0001));
+  let rsi = 50, ma7: number, ma30: number, ma90: number, bollPct = 50;
+  let stochRSI: number, williamsR: number, obvScore: number;
+  let macdBull: boolean, macdStrength: number;
+
+  if (hasLongHistory) {
+    // Puni izračun na dnevnim podacima
+    if (prices.length > 14) {
+      let g = 0, l = 0;
+      for (let i = prices.length-14; i < prices.length; i++) { const d = prices[i]-prices[i-1]; d>0?(g+=d):(l-=d); }
+      rsi = 100 - 100/(1 + g/(l||0.0001));
+    }
+    const macd = calcMACD(prices);
+    macdBull = macd.bull;
+    macdStrength = macd.strength;
+    ma7  = prices.length >= 7  ? avg(prices.slice(-7))  : price;
+    ma30 = prices.length >= 30 ? avg(prices.slice(-30)) : price;
+    ma90 = prices.length >= 90 ? avg(prices.slice(-90)) : ma30;
+    if (prices.length>=20) {
+      const sl=prices.slice(-20), m=avg(sl);
+      const std=Math.sqrt(sl.reduce((a,b)=>a+(b-m)**2,0)/20);
+      const upper=m+2*std, lower=m-2*std;
+      bollPct = upper!==lower ? ((price-lower)/(upper-lower))*100 : 50;
+    }
+    stochRSI  = calcStochRSI(prices);
+    williamsR = calcWilliamsR(prices);
+    obvScore  = calcOBVScore(prices, volumes);
+  } else {
+    // Sparkline mod (168 satnih točaka ≈ 7d)
+    if (prices.length > 14) {
+      let g = 0, l = 0;
+      for (let i = prices.length-14; i < prices.length; i++) { const d = prices[i]-prices[i-1]; d>0?(g+=d):(l-=d); }
+      rsi = 100 - 100/(1 + g/(l||0.0001));
+    }
+    const macd = prices.length >= 26 ? calcMACD(prices) : { bull: chg24 > 0, strength: Math.abs(chg24) * 0.1 };
+    macdBull = macd.bull;
+    macdStrength = macd.strength;
+
+    // FIX: MA7 = zadnji dan (24h), MA30 = zadnja 3 dana — realni kratkoročni trendovi
+    const pph = Math.max(1, Math.round(prices.length / 7)); // točaka po danu
+    ma7  = prices.length >= pph     ? avg(prices.slice(-pph))     : price;
+    ma30 = prices.length >= pph * 3 ? avg(prices.slice(-pph * 3)) : price;
+    ma90 = ma30; // ignorira se kad hasLongHistory=false
+
+    if (prices.length>=20) {
+      const sl=prices.slice(-20), m=avg(sl);
+      const std=Math.sqrt(sl.reduce((a,b)=>a+(b-m)**2,0)/20);
+      const upper=m+2*std, lower=m-2*std;
+      bollPct = upper!==lower ? ((price-lower)/(upper-lower))*100 : 50;
+    }
+    stochRSI  = calcStochRSI(prices);
+    williamsR = calcWilliamsR(prices);
+    obvScore  = calcOBVScore(prices, volumes);
+
+    // Momentum korekcija RSI/stochRSI iz API podataka
+    if (chg7 > 5)  rsi = Math.min(rsi + 15, 85);
+    if (chg7 < -5) rsi = Math.max(rsi - 15, 15);
+    if (chg24 > 3)  stochRSI = Math.min(stochRSI + 20, 95);
+    if (chg24 < -3) stochRSI = Math.max(stochRSI - 20, 5);
   }
 
-  const ema = (arr: number[], n: number) => { const k=2/(n+1); let e=arr[0]||price; arr.forEach((v,i)=>{if(i)e=v*k+e*(1-k);}); return e; };
-  const macdBull = prices.length>=26 ? ema(prices,12)>ema(prices,26) : chg24>0;
-
-  const isDailyData = extPrices && extPrices.length >= 60;
-  const maSlice = isDailyData ? extPrices! : prices;
-  const ptsPerDay = isDailyData ? 1 : Math.max(1, Math.round(prices.length / 7));
-  const ma7  = maSlice.length >= 7*ptsPerDay  ? avg(maSlice.slice(-7*ptsPerDay))  : price;
-  const ma30 = maSlice.length >= 30*ptsPerDay ? avg(maSlice.slice(-30*ptsPerDay)) : price;
-  const ma90 = maSlice.length >= 90*ptsPerDay ? avg(maSlice.slice(-90*ptsPerDay)) : ma30;
-
-  let bollPct = 50;
-  if (prices.length>=20) {
-    const sl=prices.slice(-20), m=avg(sl);
-    const std=Math.sqrt(sl.reduce((a,b)=>a+(b-m)**2,0)/20);
-    const upper=m+2*std, lower=m-2*std;
-    bollPct = upper!==lower ? ((price-lower)/(upper-lower))*100 : 50;
-  }
-
-  const stochRSI  = calcStochRSI(prices);
-  const williamsR = calcWilliamsR(prices);
-  const obvScore  = calcOBVScore(prices, volumes);
-  const athFinal  = calcATHScore(price, ath, atl);
   const volMcapRatio = mcap > 0 ? vol/mcap : 0;
   const isMemeCoin = volMcapRatio > 0.20;
+  const athFinal = calcATHScore(price, ath, atl);
 
-  // Majority vote → signal
-  const vote = majorityVote(rsi, stochRSI, williamsR, macdBull, ma7, ma30, ma90, bollPct, obvScore);
+  const vote = majorityVote(rsi, stochRSI, williamsR, macdBull, macdStrength, ma7, ma30, ma90, bollPct, obvScore, hasLongHistory);
   let signal = vote.signal;
   let finalScore = vote.score;
 
-  // Meme coin penalty
   if (isMemeCoin) {
     finalScore = Math.max(0, finalScore - 15);
     if (signal === "STRONG BUY") signal = "BUY";
     if (signal === "BUY" && finalScore < 55) signal = "NEUTRAL";
   }
 
-  // Score komponente za prikaz (breakdown)
   const maTrend = ma7>ma30&&ma30>ma90?75 : ma7>ma30?62 : ma7<ma30&&ma30<ma90?25 : 38;
   const rsiScore   = rsi<30?82:rsi>70?20:50+(50-rsi)*0.65;
   const stochScore = stochRSI<20?82:stochRSI>80?20:50+(50-stochRSI)*0.65;
@@ -229,7 +289,6 @@ function computePrediction(coin: any, tokenSentiment: number, extPrices?: number
   const momScore  = Math.min(100,Math.max(0,50+capMom(chg24,4.5)+capMom(chg7,2.4)));
   const athCapped = isMemeCoin && athFinal > 45 ? 45 : athFinal;
 
-  // Predicted price baziran na vote score
   const pct = ((finalScore-50)/50)*30;
   const predicted7d = price*(1+pct/100);
 
@@ -239,9 +298,10 @@ function computePrediction(coin: any, tokenSentiment: number, extPrices?: number
   const confidence=Math.max(38,Math.min(94,88-variance*0.9));
 
   return {
-    rsi:+rsi.toFixed(1), macdBull, ma7:+ma7.toFixed(2), ma30:+ma30.toFixed(2), ma90:+ma90.toFixed(2),
+    rsi:+rsi.toFixed(1), macdBull, macdStrength:+macdStrength.toFixed(3),
+    ma7:+ma7.toFixed(2), ma30:+ma30.toFixed(2), ma90:+ma90.toFixed(2),
     bollPct:+bollPct.toFixed(0), stochRSI:+stochRSI.toFixed(1), williamsR:+williamsR.toFixed(1),
-    obvScore:+obvScore.toFixed(0), athScore:+athFinal.toFixed(0),
+    obvScore:+obvScore.toFixed(0), athScore:+athCapped.toFixed(0),
     techScore:+techScore.toFixed(1), volScore:+volFinal.toFixed(1), momScore:+momScore.toFixed(1),
     finalScore:+finalScore.toFixed(1), pct:+pct.toFixed(2),
     predicted7d:+predicted7d.toFixed(price<1?4:price<100?2:0),
@@ -266,14 +326,16 @@ function buildRetroSignals(prices: number[], volumes?: number[]): { score: numbe
   avgGain/=14; avgLoss/=14;
 
   const avgArr = (a: number[]) => a.reduce((s,v)=>s+v,0)/a.length;
-  const macdArr: number[] = [];
-  const ind: { rsi:number; macd:number; ma7:number; ma30:number; ma90:number; bollPct:number; stochRSI:number; obvScore:number }[] = [];
+  const macdLineArr: number[] = [];
+  const macdSigArr:  number[] = [];
+  const ind: { rsi:number; macdLine:number; macdSig:number; ma7:number; ma30:number; ma90:number; bollPct:number; stochRSI:number; obvScore:number }[] = [];
 
   for (let i=0; i<n; i++) {
     if (i>0) { ema12=prices[i]*k12+ema12*(1-k12); ema26=prices[i]*k26+ema26*(1-k26); }
     const macdLine=ema12-ema26;
     if (i===0) emaSignal=macdLine; else emaSignal=macdLine*k9+emaSignal*(1-k9);
-    macdArr.push(macdLine-emaSignal);
+    macdLineArr.push(macdLine);
+    macdSigArr.push(emaSignal);
     if (i>=15) { const d=prices[i]-prices[i-1]; avgGain=(avgGain*13+Math.max(0,d))/14; avgLoss=(avgLoss*13+Math.max(0,-d))/14; }
     const rsi = avgLoss===0?100:100-100/(1+avgGain/avgLoss);
     const ma7  = avgArr(prices.slice(Math.max(0,i-6),  i+1));
@@ -286,20 +348,25 @@ function buildRetroSignals(prices: number[], volumes?: number[]): { score: numbe
     const stochRSI = calcStochRSI(prices.slice(Math.max(0,i-27),i+1));
     const sliceV = volumes ? volumes.slice(Math.max(0,i-Math.min(i,13)),i+1) : [];
     const obvScore = volumes ? calcOBVScore(prices.slice(Math.max(0,i-13),i+1), sliceV) : 50;
-    ind.push({ rsi, macd:macdArr[i], ma7, ma30, ma90, bollPct, stochRSI, obvScore });
+    ind.push({ rsi, macdLine, macdSig: emaSignal, ma7, ma30, ma90, bollPct, stochRSI, obvScore });
   }
 
   return ind.map((d, i) => {
     if (i < 20) return { score:50, signal:"—", color:"#475569" };
-    const macdBull = d.macd > 0;
-    const v = majorityVote(d.rsi, d.stochRSI, calcWilliamsR(prices.slice(Math.max(0,i-13),i+1)),
-      macdBull, d.ma7, d.ma30, d.ma90, d.bollPct, d.obvScore);
+    const avgPrice = prices.slice(Math.max(0,i-25), i+1).reduce((a,b)=>a+b,0) / Math.min(i+1,26);
+    const macdBull = d.macdLine > d.macdSig;
+    const macdStrength = avgPrice > 0 ? Math.abs(d.macdLine - d.macdSig) / avgPrice * 100 : 0;
+    const v = majorityVote(
+      d.rsi, d.stochRSI, calcWilliamsR(prices.slice(Math.max(0,i-13),i+1)),
+      macdBull, macdStrength, d.ma7, d.ma30, d.ma90, d.bollPct, d.obvScore,
+      true // buildRetroSignals uvijek radi na history podacima
+    );
     const color = v.signal==="STRONG BUY"?"#4ade80":v.signal==="BUY"?"#86efac":v.signal==="NEUTRAL"?"#facc15":v.signal==="SELL"?"#fca5a5":"#f87171";
     return { score:v.score, signal:v.signal, color };
   });
 }
 
-// ── Backtest logika (majority vote) ───────────────────────────────────────────
+// ── Backtest logika ────────────────────────────────────────────────────────────
 interface BacktestWeek {
   weekIdx: number; signal: string; signalScore: number;
   correct: boolean | null; priceThen: number;
@@ -314,14 +381,10 @@ function computeBacktest(prices: number[], volumes: number[], coin: any): Backte
   const ptsPerDay = Math.max(1, Math.round(n / 90));
   const ptsPerWeek = ptsPerDay * 7;
   const avgArr = (arr: number[]) => arr.reduce((a,b)=>a+b,0)/arr.length;
-  const ema = (arr: number[], period: number) => {
-    const k=2/(period+1); let e=arr[0];
-    arr.forEach((v,i)=>{ if(i) e=v*k+e*(1-k); }); return e;
-  };
 
   for (let weekIdx=0; weekIdx<13; weekIdx++) {
     const endIdx = Math.min(n-1, Math.round((weekIdx/12)*(n-1-ptsPerWeek)));
-    if (endIdx < 20) continue;
+    if (endIdx < 14) continue; // FIX: snižen prag s 20 na 14 da prvi tjedni ne ispadaju
     const sp = prices.slice(0, endIdx+1);
     const sv = volumes.slice(0, endIdx+1);
     const cur = sp[sp.length-1];
@@ -332,7 +395,9 @@ function computeBacktest(prices: number[], volumes: number[], coin: any): Backte
       for (let i=sp.length-14;i<sp.length;i++) { const d=sp[i]-sp[i-1]; d>0?(g+=d):(l-=d); }
       rsi=100-100/(1+(g/(l||0.0001)));
     }
-    const macdBull = sp.length>=26 ? ema(sp,12)>ema(sp,26) : false;
+    const macd = sp.length >= 26 ? calcMACD(sp) : { bull: false, strength: 0 };
+    const macdBull = macd.bull;
+    const macdStrength = macd.strength;
     const ma7  = sp.length>=7  ? avgArr(sp.slice(-7))  : cur;
     const ma30 = sp.length>=30 ? avgArr(sp.slice(-30)) : cur;
     const ma90 = sp.length>=90 ? avgArr(sp.slice(-90)) : ma30;
@@ -347,7 +412,7 @@ function computeBacktest(prices: number[], volumes: number[], coin: any): Backte
     const williamsR = calcWilliamsR(sp);
     const obvScore = calcOBVScore(sp, sv);
 
-    const vote = majorityVote(rsi, stochRSI, williamsR, macdBull, ma7, ma30, ma90, bollPct, obvScore);
+    const vote = majorityVote(rsi, stochRSI, williamsR, macdBull, macdStrength, ma7, ma30, ma90, bollPct, obvScore, true);
     const volMcapRatio = (coin.market_cap??1) > 0 ? (coin.total_volume??0)/(coin.market_cap??1) : 0;
     const isMemeCoin = volMcapRatio > 0.20;
     let { signal, score: signalScore } = vote;
@@ -365,7 +430,6 @@ function computeBacktest(prices: number[], volumes: number[], coin: any): Backte
     if (pctChange!==null) {
       if (signal==="BUY"||signal==="STRONG BUY") correct=pctChange>0;
       else if (signal==="SELL"||signal==="STRONG SELL") correct=pctChange<0;
-      // NEUTRAL se NE računa u točnost (correct ostaje null)
     }
     results.push({ weekIdx, signal, signalScore, correct, priceThen, price7dLater, pctChange });
   }
@@ -573,7 +637,7 @@ function CandlestickChart({ cgId, color }: { cgId: string; color: string }) {
     fetch(`/api/ohlc?id=${cgId}&days=${tfToDays[tf]}&currency=eur`)
       .then(r=>r.json()).then(d=>{if(Array.isArray(d))setOhlc(d);})
       .catch(()=>{}).finally(()=>setLoading(false));
-  },[cgId,tf]);
+  },[cgId,tf]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const W=600,H=200,padL=60,padR=8,padT=10,padB=24;
   const chartW=W-padL-padR, chartH=H-padT-padB;
@@ -668,41 +732,49 @@ function useExtendedData(cgId: string | null) {
 
 // ── Hook za lazy load history svih tokena ─────────────────────────────────────
 function useAllHistory(tokens: Token[], ready: boolean) {
-  const [allHistory,setAllHistory]=useState<Record<string,{prices:number[];volumes:number[]}>>({});
-  const fetchedRef=useRef<Set<string>>(new Set());
-  const runningRef=useRef(false);
+  const [allHistory, setAllHistory] = useState<Record<string,{prices:number[];volumes:number[]}>>({});
+  const fetchedRef  = useRef<Set<string>>(new Set());
+  const runningRef  = useRef(false);
+  const tokenKey = useMemo(() => tokens.map(t => t.cg).join(","), [tokens]);
 
-  useEffect(()=>{
-    if(!ready||tokens.length===0) return;
-    const toFetch=tokens.filter(t=>!fetchedRef.current.has(t.cg));
-    if(toFetch.length===0) return;
-    if(runningRef.current) return;
-    let cancelled=false;
+  useEffect(() => {
+    if (!ready || tokens.length === 0) return;
+    const toFetch = tokens.filter(t => !fetchedRef.current.has(t.cg));
+    if (toFetch.length === 0) return;
+    if (runningRef.current) return;
+    let cancelled = false;
 
-    const fetchWithRetry=async(cg:string,attempt=0):Promise<{fromCache:boolean}>=>{
-      try{
-        const t0=Date.now(),r=await fetch(`/api/history?id=${cg}&days=90&currency=eur`),elapsed=Date.now()-t0;
-        const d=await r.json();
-        if(r.status===429&&attempt<3){await new Promise(res=>setTimeout(res,5000*Math.pow(2,attempt)));return fetchWithRetry(cg,attempt+1);}
-        if(!cancelled&&d&&!d.error)setAllHistory(prev=>({...prev,[cg]:d}));
-        return{fromCache:elapsed<400};
-      }catch{return{fromCache:false};}
+    const fetchWithRetry = async (cg: string, attempt = 0): Promise<{fromCache: boolean}> => {
+      try {
+        const t0 = Date.now();
+        const r = await fetch(`/api/history?id=${cg}&days=90&currency=eur`);
+        const elapsed = Date.now() - t0;
+        const d = await r.json();
+        if (r.status === 429 && attempt < 3) {
+          await new Promise(res => setTimeout(res, 5000 * Math.pow(2, attempt)));
+          return fetchWithRetry(cg, attempt + 1);
+        }
+        if (!cancelled && d && !d.error) setAllHistory(prev => ({...prev, [cg]: d}));
+        return { fromCache: elapsed < 400 };
+      } catch {
+        return { fromCache: false };
+      }
     };
 
-    const run=async()=>{
-      runningRef.current=true;
-      for(const token of toFetch){
-        if(cancelled)break;
-        if(fetchedRef.current.has(token.cg))continue;
+    const run = async () => {
+      runningRef.current = true;
+      for (const token of toFetch) {
+        if (cancelled) break;
+        if (fetchedRef.current.has(token.cg)) continue;
         fetchedRef.current.add(token.cg);
-        const{fromCache}=await fetchWithRetry(token.cg);
-        if(!cancelled&&!fromCache)await new Promise(res=>setTimeout(res,3000));
+        const { fromCache } = await fetchWithRetry(token.cg);
+        if (!cancelled && !fromCache) await new Promise(res => setTimeout(res, 3000));
       }
-      runningRef.current=false;
+      runningRef.current = false;
     };
     run();
-    return()=>{cancelled=true;};
-  },[ready,tokens.map(t=>t.cg).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
+  }, [ready, tokenKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return allHistory;
 }
@@ -809,13 +881,16 @@ function BollingerHelp({bollPct}:{bollPct:number}) {
   const zoneColor=zone==="low"?"#4ade80":zone==="high"?"#f87171":"#facc15";
   return <HelpTooltip><div style={{fontWeight:700,color:"#e2e8f0",marginBottom:8,fontSize:12}}>📐 Bollinger Bands</div><div style={{padding:"7px 10px",borderRadius:6,background:zone==="mid"?"#1a1500":zone==="low"?"#0f2a1a":"#2a0f0f",border:`1px solid ${zoneColor}40`,color:zoneColor,fontWeight:600}}>{bollPct}% — {zone==="low"?"blizu dna":zone==="high"?"blizu vrha":"unutar kanala"}</div></HelpTooltip>;
 }
-function MACDHelp({macdBull}:{macdBull:boolean}) {
-  return <HelpTooltip><div style={{fontWeight:700,color:"#e2e8f0",marginBottom:8,fontSize:12}}>📊 MACD</div><div style={{padding:"7px 10px",borderRadius:6,background:macdBull?"#0f2a1a":"#2a0f0f",border:`1px solid ${macdBull?"#4ade8040":"#f8717140"}`,color:macdBull?"#4ade80":"#f87171",fontWeight:600}}>{macdBull?"✅ Bullish":"⚠️ Bearish"}</div></HelpTooltip>;
+function MACDHelp({macdBull,macdStrength}:{macdBull:boolean;macdStrength:number}) {
+  const weak = macdStrength < 0.05;
+  return <HelpTooltip><div style={{fontWeight:700,color:"#e2e8f0",marginBottom:8,fontSize:12}}>📊 MACD</div><div style={{padding:"7px 10px",borderRadius:6,background:weak?"#1a1500":macdBull?"#0f2a1a":"#2a0f0f",border:`1px solid ${weak?"#facc1540":macdBull?"#4ade8040":"#f8717140"}`,color:weak?"#facc15":macdBull?"#4ade80":"#f87171",fontWeight:600}}>{weak?"➡️ Slab signal (neutralno)":macdBull?"✅ Bullish":"⚠️ Bearish"} <span style={{fontSize:9,opacity:0.7}}>({macdStrength.toFixed(3)}%)</span></div></HelpTooltip>;
 }
 function MAHelpButton({ma7,ma30}:{ma7:number;ma30:number}) {
   const bullish=ma7>ma30;
+  const diff = ma30 > 0 ? Math.abs(ma7-ma30)/ma30*100 : 0;
+  const weak = diff < 0.5;
   const fmt=(v:number)=>v>=1000?"$"+v.toLocaleString("en-US",{maximumFractionDigits:0}):v>=1?"$"+v.toFixed(2):"$"+v.toFixed(4);
-  return <HelpTooltip><div style={{fontWeight:700,color:"#e2e8f0",marginBottom:8,fontSize:12}}>📊 MA7 vs MA30</div><div style={{background:"#060d18",borderRadius:7,padding:"8px 10px",marginBottom:8,border:"1px solid #1e2d3d"}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{color:"#22d3ee"}}>MA7</span><span style={{color:"#e2e8f0",fontWeight:700}}>{fmt(ma7)}</span></div><div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#a78bfa"}}>MA30</span><span style={{color:"#e2e8f0",fontWeight:700}}>{fmt(ma30)}</span></div></div><div style={{padding:"7px 10px",borderRadius:6,background:bullish?"#0f2a1a":"#2a0f0f",border:`1px solid ${bullish?"#4ade8040":"#f8717140"}`,color:bullish?"#4ade80":"#f87171",fontWeight:600}}>{bullish?"✅ Golden Cross":"⚠️ Death Cross"}</div></HelpTooltip>;
+  return <HelpTooltip><div style={{fontWeight:700,color:"#e2e8f0",marginBottom:8,fontSize:12}}>📊 MA7 vs MA30</div><div style={{background:"#060d18",borderRadius:7,padding:"8px 10px",marginBottom:8,border:"1px solid #1e2d3d"}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{color:"#22d3ee"}}>MA7</span><span style={{color:"#e2e8f0",fontWeight:700}}>{fmt(ma7)}</span></div><div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:"#a78bfa"}}>MA30</span><span style={{color:"#e2e8f0",fontWeight:700}}>{fmt(ma30)}</span></div></div><div style={{padding:"7px 10px",borderRadius:6,background:weak?"#1a1500":bullish?"#0f2a1a":"#2a0f0f",border:`1px solid ${weak?"#facc1540":bullish?"#4ade8040":"#f8717140"}`,color:weak?"#facc15":bullish?"#4ade80":"#f87171",fontWeight:600}}>{weak?"➡️ Gotovo jednaki (neutralno)":bullish?"✅ Golden Cross":"⚠️ Death Cross"} <span style={{fontSize:9,opacity:0.7}}>({diff.toFixed(2)}%)</span></div></HelpTooltip>;
 }
 
 // ── PriceChart ─────────────────────────────────────────────────────────────────
@@ -903,7 +978,7 @@ function PriceChart({prices,color,symbol,historyPrices,historyVolumes}:{prices:n
           ))}
         </div>
       </div>
-      {showSignal&&hasHistory&&<div style={{marginBottom:8,padding:"6px 10px",background:"#060d18",borderRadius:6,border:"1px solid #1e2d3d",fontSize:10,color:"#475569"}}>⚠️ <b style={{color:"#f59e0b"}}>Majority vote signal</b> — ≥65% indikatora mora se složiti za BUY/SELL. Hover za detalje.</div>}
+      {showSignal&&hasHistory&&<div style={{marginBottom:8,padding:"6px 10px",background:"#060d18",borderRadius:6,border:"1px solid #1e2d3d",fontSize:10,color:"#475569"}}>⚠️ <b style={{color:"#f59e0b"}}>Majority vote signal</b> — ≥55% indikatora mora se složiti za BUY/SELL. Hover za detalje.</div>}
       <div style={{background:"#060d18",borderRadius:10,padding:"12px 8px 4px",border:"1px solid #1e2d3d"}}>
         <svg ref={svgRef} viewBox={`0 0 ${w} ${h+24}`} width="100%" style={{display:"block",overflow:"visible",cursor:"crosshair"}} onMouseMove={handleMouseMove} onMouseLeave={()=>setTooltip(null)}>
           <defs>
@@ -1172,13 +1247,41 @@ export default function Home() {
                   <div style={{paddingRight:t.custom?22:0}}/>
                 </div>
                 <MiniChart prices={spark} color={t.color}/>
-                <div style={{display:"flex",justifyContent:"flex-end",marginTop:8,fontSize:11}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8,fontSize:11}}>
                   {!allHistory[t.cg]
                     ?<span style={{display:"flex",alignItems:"center",gap:5,color:"#334155"}}><span style={{display:"inline-block",width:10,height:10,border:"2px solid #1e3a5f",borderTopColor:"#22d3ee",borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>analiza…</span>
                     :<span style={{display:"flex",alignItems:"center",gap:6}}>
                         {p.isMemeCoin&&<span style={{fontSize:13,color:"#f87171",fontWeight:700,lineHeight:1}} title="Meme coin">⚠️</span>}
                         <span style={{color:sigColor(p.signal),fontWeight:700}}>{p.signal}</span>
                       </span>}
+                  {(()=>{
+                    const h=allHistory[t.cg];
+                    if(!h) return null;
+                    const bt=computeBacktest(h.prices,h.volumes,c);
+                    if(!bt.length) return null;
+                    const valid=bt.filter(w=>w.correct!==null);
+                    const neutralCount=bt.filter(w=>w.signal==="NEUTRAL").length;
+                    const totalSignals=bt.length;
+                    // Ako nema BUY/SELL signala — prikaži "sve NEUTRAL"
+                    if(!valid.length){
+                      const neutralPct=Math.round(neutralCount/totalSignals*100);
+                      return(
+                        <span style={{display:"flex",alignItems:"center",gap:4,background:"#060d18",borderRadius:6,padding:"2px 7px",border:"1px solid #33415530"}} title={`Svi signali NEUTRAL (${neutralPct}%) — nema BUY/SELL za mjerenje točnosti`}>
+                          <span style={{color:"#334155",fontSize:9}}>BT</span>
+                          <span style={{color:"#475569",fontWeight:700,fontSize:11}}>—</span>
+                        </span>
+                      );
+                    }
+                    const pct=Math.round(valid.filter(w=>w.correct).length/valid.length*100);
+                    const color=pct>=60?"#4ade80":pct>=45?"#facc15":"#f87171";
+                    const title=`Backtest točnost: ${pct}% (${valid.filter(w=>w.correct).length}/${valid.length} BUY/SELL signala · ${neutralCount} NEUTRAL preskočeno)`;
+                    return(
+                      <span style={{display:"flex",alignItems:"center",gap:4,background:"#060d18",borderRadius:6,padding:"2px 7px",border:`1px solid ${color}30`}} title={title}>
+                        <span style={{color:"#334155",fontSize:9}}>BT</span>
+                        <span style={{color,fontWeight:700,fontSize:11}}>{pct}%</span>
+                      </span>
+                    );
+                  })()}
                 </div>
               </div>
             );
@@ -1201,7 +1304,7 @@ export default function Home() {
                   </h2>
                   <div style={{display:"flex",alignItems:"center",gap:12}}>
                     <div style={{textAlign:"center",padding:"10px 14px",background:"#060d18",borderRadius:10,border:`1px solid ${p.finalScore>60?"#4ade80":p.finalScore<40?"#f87171":"#facc15"}40`}}>
-                      <div style={{fontSize:10,color:"#64748b",marginBottom:2}}>AI Composite Score</div>
+                      <div style={{fontSize:10,color:"#64748b",marginBottom:2}}>Majority Vote Score</div>
                       <div style={{fontSize:26,fontWeight:900,color:p.finalScore>60?"#4ade80":p.finalScore<40?"#f87171":"#facc15",lineHeight:1}}>{p.finalScore.toFixed(0)}</div>
                       <div style={{fontSize:11,color:sigColor(p.signal),fontWeight:700,marginTop:2}}>{p.signal}</div>
                     </div>
@@ -1274,7 +1377,7 @@ export default function Home() {
                       ["RSI (14)",    null,null,<RSIHelp key="rsi" rsi={p.rsi}/>],
                       ["Stoch RSI",  null,null,<StochRSIHelp key="stoch" value={p.stochRSI}/>],
                       ["Williams %R",null,null,<WilliamsRHelp key="wr" value={p.williamsR}/>],
-                      ["MACD",       p.macdBull?"Bullish ▲":"Bearish ▼",p.macdBull?"#4ade80":"#f87171",<MACDHelp key="macd" macdBull={p.macdBull}/>],
+                      ["MACD",       p.macdBull?"Bullish ▲":"Bearish ▼",p.macdBull?"#4ade80":"#f87171",<MACDHelp key="macd" macdBull={p.macdBull} macdStrength={p.macdStrength}/>],
                       ["MA7 vs MA30",p.ma7>p.ma30?"Golden Cross ▲":"Death Cross ▼",p.ma7>p.ma30?"#4ade80":"#f87171",<MAHelpButton key="ma" ma7={p.ma7} ma30={p.ma30}/>],
                       ["Bollinger",  null,null,<BollingerHelp key="boll" bollPct={p.bollPct}/>],
                     ] as [string,string|null,string|null,React.ReactNode][]).map(([k,v,cl,help])=>(
